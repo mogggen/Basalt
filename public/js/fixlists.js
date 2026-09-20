@@ -47,6 +47,7 @@
         const lvl = levels[levels.length - 1];
         const rest = line.slice(om[0].length);
         out.push(om[1] + (lvl.next - 1) + lvl.marker + (rest ? " " + rest : ""));
+        lvl.next += 1;
         continue;
       }
 

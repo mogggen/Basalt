@@ -1,26 +1,29 @@
-/* global CodeMirror, mermaid, fixOrderedLists */
+/* global CodeMirror, mermaid, fixOrderedLists, htmlToMarkdown, findPreviewBlocks, findUnderlineSpans, widgetSignature */
 (function () {
   "use strict";
   const $ = (sel) => document.querySelector(sel);
   const fileListEl = $("#filelist");
   const statusEl = $("#status");
   const saveEl = $("#savestate");
+  const keymapEl = $("#keymap-label");
   const importInput = $("#import-file");
 
   let currentFile = null;
   let lastNewNote = 0;
   let mermaidInit = false;
+  let vimInsert = false;
+  let applying = false;
+  let lastWidgetSig = "";
 
-  /* ---------------- editor ---------------- */
   const cm = CodeMirror.fromTextArea($("#editor"), {
-    mode: "markdown",
+    mode: { name: "markdown", strikethrough: true, highlightFormatting: true, taskLists: true },
     keyMap: "vim",
     lineNumbers: true,
     lineWrapping: true,
     autoCloseBrackets: true,
     styleActiveLine: true,
     fencedCodeBlockHighlighting: false,
-    placeholder: "Start writing… (vim motions, tables, mermaid, paste images)",
+    placeholder: "Start writing… (vim motions, tables, mermaid, paste images or HTML)",
     extraKeys: {
       "Enter": "newlineAndIndentContinueMarkdownList",
       "Tab": (c) => (c.somethingSelected() ? c.indentSelection("add") : c.replaceSelection("  ")),
@@ -56,39 +59,44 @@
     "Ctrl-U": underline, "Cmd-U": underline,
     "Ctrl-Shift-X": strike, "Shift-Ctrl-X": strike,
     "Cmd-Shift-X": strike, "Shift-Cmd-X": strike,
-    "Ctrl-S": saveNow, "Cmd-S": saveNow,
+    "Ctrl-S": () => saveNow({ force: true }), "Cmd-S": () => saveNow({ force: true }),
     "Ctrl-N": newUnnamed, "Cmd-N": newUnnamed,
   };
   cm.addKeyMap(formatMap);
   if (window.CodeMirror?.Vim) {
     const Vim = CodeMirror.Vim;
-    const maps = [
-      ["<C-b>", "bold"], ["<C-i>", "italic"], ["<C-u>", "underline"],
-      ["<C-S-x>", "strike"], ["<C-n>", "newUnnamed"],
-    ];
     Vim.defineAction("bold", bold);
     Vim.defineAction("italic", italic);
     Vim.defineAction("underline", underline);
     Vim.defineAction("strike", strike);
     Vim.defineAction("newUnnamed", newUnnamed);
-    for (const [keys, name] of maps) {
+    for (const [keys, name] of [["<C-b>", "bold"], ["<C-i>", "italic"], ["<C-u>", "underline"], ["<C-S-x>", "strike"], ["<C-n>", "newUnnamed"]]) {
       try { Vim.mapCommand(keys, "action", name, {}, { context: "insert" }); } catch {}
       try { Vim.mapCommand(keys, "action", name, {}, { context: "normal" }); } catch {}
     }
   }
 
+  cm.on("vim-mode-change", (ev) => {
+    vimInsert = ev.mode === "insert" || ev.mode === "replace";
+    keymapEl.textContent = vimInsert ? "-- INSERT --" : "vim";
+    if (!vimInsert) {
+      scheduleSave();
+      refreshWidgetsSoon();
+      refreshUnderlines();
+    }
+  });
+
   window.addEventListener("keydown", (e) => {
     const key = e.key.toLowerCase();
     if (!(e.ctrlKey || e.metaKey)) return;
     if (key === "n") { e.preventDefault(); newUnnamed(); }
-    if (key === "s") { e.preventDefault(); saveNow(); }
+    if (key === "s") { e.preventDefault(); saveNow({ force: true }); }
     if (key === "b") { e.preventDefault(); bold(); }
     if (key === "i" && !e.shiftKey) { e.preventDefault(); italic(); }
     if (key === "u") { e.preventDefault(); underline(); }
     if (key === "x" && e.shiftKey) { e.preventDefault(); strike(); }
   }, true);
 
-  /* ---------------- files ---------------- */
   async function loadFileList(selectName) {
     const files = await (await fetch("/api/files")).json();
     fileListEl.innerHTML = "";
@@ -104,7 +112,7 @@
         e.stopPropagation();
         if (!confirm(`Delete “${f.name}”? This cannot be undone.`)) return;
         await fetch(`/api/file?name=${encodeURIComponent(f.name)}`, { method: "DELETE" });
-        if (currentFile === f.name) { currentFile = null; cm.setValue(""); refreshWidgetsSoon(); }
+        if (currentFile === f.name) { currentFile = null; cm.setValue(""); lastWidgetSig = ""; refreshWidgetsSoon(); }
         loadFileList();
       });
       li.appendChild(del);
@@ -115,11 +123,13 @@
   }
 
   async function openFile(name) {
-    await saveNow();
+    await saveNow({ force: true });
     currentFile = name;
+    lastWidgetSig = "";
     cm.setValue(await (await fetch(`/api/file?name=${encodeURIComponent(name)}`)).text());
     [...fileListEl.children].forEach((li) => li.classList.toggle("active", li.dataset.name === name));
     refreshWidgetsSoon();
+    refreshUnderlines();
     updateCounts();
     setStatus("Opened " + name);
   }
@@ -139,25 +149,51 @@
 
   $("#btn-new").addEventListener("click", newUnnamed);
 
-  /* ---------------- save / autosave / numbering ---------------- */
   let saveTimer = null, widgetTimer = null;
-  const scheduleSave = () => { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 800); };
+  const scheduleSave = () => {
+    if (vimInsert) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveNow(), 800);
+  };
 
-  cm.on("change", () => { saveEl.textContent = "…"; scheduleSave(); refreshWidgetsSoon(); updateCounts(); });
-  cm.on("cursorActivity", () => refreshWidgetsSoon());
+  cm.on("change", () => {
+    if (applying) return;
+    saveEl.textContent = "…";
+    updateCounts();
+    refreshUnderlines();
+    if (vimInsert) return;
+    scheduleSave();
+    refreshWidgetsSoon();
+  });
+  cm.on("cursorActivity", () => {
+    if (vimInsert) return;
+    refreshWidgetsSoon();
+    refreshUnderlines();
+  });
 
-  function setDoc(text) {
-    const cur = cm.getCursor(), sc = cm.getScrollInfo();
-    cm.setValue(text);
-    cm.setCursor(cur); cm.scrollTo(sc.left, sc.top);
+  function applyFixedText(text) {
+    applying = true;
+    try {
+      const cur = cm.getCursor();
+      const last = cm.lastLine();
+      cm.replaceRange(text, { line: 0, ch: 0 }, { line: last, ch: cm.getLine(last).length });
+      cm.setCursor(cur);
+    } finally {
+      applying = false;
+    }
   }
 
-  async function saveNow() {
+  async function saveNow(opts) {
+    const force = opts && opts.force;
     clearTimeout(saveTimer);
     if (!currentFile) return;
+    if (vimInsert && !force) return;
     let content = cm.getValue();
     const fixed = fixOrderedLists(content);
-    if (fixed !== content) { content = fixed; setDoc(fixed); }
+    if (fixed !== content) {
+      content = fixed;
+      applyFixedText(fixed);
+    }
     const res = await fetch("/api/file", {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: currentFile, content, fixLists: true }),
@@ -195,56 +231,21 @@
     }
   }
 
-  /* ---------------- inline preview widgets ---------------- */
   const widgetMarks = [];
   const widgetCache = new Map();
+  const underlineMarks = [];
+
+  function withPreservedScroll(fn) {
+    const sc = cm.getScrollInfo();
+    fn();
+    cm.scrollTo(sc.left, sc.top);
+  }
 
   function refreshWidgetsSoon() {
     clearTimeout(widgetTimer);
     widgetTimer = setTimeout(() => {
       refreshWidgets().catch((e) => console.warn("widgets", e));
     }, 120);
-  }
-
-  function findPreviewBlocks(text) {
-    const lines = text.split("\n");
-    const blocks = [];
-    let i = 0;
-    while (i < lines.length) {
-      const fence = lines[i].match(/^(\s*)(`{3,}|~{3,})(.*)$/);
-      if (fence) {
-        const closer = fence[2].charAt(0);
-        const len = fence[2].length;
-        let j = i + 1;
-        while (j < lines.length) {
-          const m = lines[j].match(/^(\s*)(`{3,}|~{3,})/);
-          if (m && m[2].charAt(0) === closer && m[2].length >= len) break;
-          j++;
-        }
-        const lang = (fence[3] || "").trim().split(/\s+/)[0].toLowerCase();
-        blocks.push({
-          type: lang === "mermaid" ? "mermaid" : "code",
-          from: i,
-          to: Math.min(j, lines.length - 1),
-        });
-        i = j + 1;
-        continue;
-      }
-      if (/^\s*\|/.test(lines[i])) {
-        let j = i;
-        while (j < lines.length && /^\s*\|/.test(lines[j])) j++;
-        if (j - i >= 2) blocks.push({ type: "table", from: i, to: j - 1 });
-        i = j;
-        continue;
-      }
-      if (/^\s*!\[[^\]]*\]\([^)]+\)\s*$/.test(lines[i])) {
-        blocks.push({ type: "image", from: i, to: i });
-        i++;
-        continue;
-      }
-      i++;
-    }
-    return blocks;
   }
 
   function cursorTouches(block, cur) {
@@ -259,33 +260,40 @@
     const text = cm.getValue();
     const blocks = findPreviewBlocks(text);
     const sel = cm.listSelections();
-    for (const m of widgetMarks.splice(0)) {
-      try { m.clear(); } catch {}
-    }
-    for (const block of blocks) {
-      if (sel.some((s) => cursorTouches(block, s))) continue;
-      const source = cm.getRange({ line: block.from, ch: 0 }, { line: block.to, ch: cm.getLine(block.to).length });
-      const key = block.type + "\n" + source;
-      let node = widgetCache.get(key);
-      if (!node) {
-        node = document.createElement("div");
-        node.className = "cm-preview-widget";
-        node.dataset.key = key;
-        widgetCache.set(key, node);
-        fillWidget(node, block.type, source);
+    const sig = widgetSignature(blocks, sel) + "\n" +
+      blocks.map((b) => cm.getRange({ line: b.from, ch: 0 }, { line: b.to, ch: cm.getLine(b.to).length })).join("\x1e");
+    if (sig === lastWidgetSig) return;
+    lastWidgetSig = sig;
+
+    withPreservedScroll(() => {
+      for (const m of widgetMarks.splice(0)) {
+        try { m.clear(); } catch {}
       }
-      node.onmousedown = (e) => {
-        e.preventDefault();
-        cm.focus();
-        cm.setCursor({ line: block.from, ch: 0 });
-      };
-      const mark = cm.markText(
-        { line: block.from, ch: 0 },
-        { line: block.to, ch: cm.getLine(block.to).length },
-        { replacedWith: node, atomic: true, inclusiveLeft: false, inclusiveRight: false, handleMouseEvents: true }
-      );
-      widgetMarks.push(mark);
-    }
+      for (const block of blocks) {
+        if (sel.some((s) => cursorTouches(block, s))) continue;
+        const source = cm.getRange({ line: block.from, ch: 0 }, { line: block.to, ch: cm.getLine(block.to).length });
+        const key = block.type + "\n" + source;
+        let node = widgetCache.get(key);
+        if (!node) {
+          node = document.createElement("div");
+          node.className = "cm-preview-widget";
+          widgetCache.set(key, node);
+          fillWidget(node, block.type, source);
+        }
+        node.onmousedown = (e) => {
+          e.preventDefault();
+          lastWidgetSig = "";
+          cm.focus();
+          cm.setCursor({ line: block.from, ch: 0 });
+        };
+        const mark = cm.markText(
+          { line: block.from, ch: 0 },
+          { line: block.to, ch: cm.getLine(block.to).length },
+          { replacedWith: node, atomic: true, inclusiveLeft: false, inclusiveRight: false, handleMouseEvents: true }
+        );
+        widgetMarks.push(mark);
+      }
+    });
     if (widgetCache.size > 80) {
       for (const [key, node] of widgetCache) {
         if (!node.isConnected) widgetCache.delete(key);
@@ -293,10 +301,46 @@
     }
   }
 
+  function posLte(a, b) {
+    return a.line < b.line || (a.line === b.line && a.ch <= b.ch);
+  }
+  function selectionTouchesSpan(sel, span) {
+    const lo = posLte(sel.anchor, sel.head) ? sel.anchor : sel.head;
+    const hi = posLte(sel.anchor, sel.head) ? sel.head : sel.anchor;
+    return posLte(span.openFrom, hi) && posLte(lo, span.closeTo);
+  }
+
+  function refreshUnderlines() {
+    withPreservedScroll(() => {
+      for (const m of underlineMarks.splice(0)) {
+        try { m.clear(); } catch {}
+      }
+      const text = cm.getValue();
+      const sel = cm.listSelections();
+      for (const span of findUnderlineSpans(text)) {
+        underlineMarks.push(cm.markText(span.innerFrom, span.innerTo, {
+          className: "cm-underline",
+          inclusiveLeft: true,
+          inclusiveRight: true,
+        }));
+        const editing = sel.some((s) => selectionTouchesSpan(s, span));
+        if (!editing) {
+          underlineMarks.push(cm.markText(span.openFrom, span.openTo, { collapsed: true, atomic: true }));
+          underlineMarks.push(cm.markText(span.closeFrom, span.closeTo, { collapsed: true, atomic: true }));
+        }
+      }
+    });
+  }
+
   function resolvePreviewNode(root) {
     root.querySelectorAll("img").forEach((img) => {
       const src = img.getAttribute("src") || "";
       if (!/^(https?:|data:|\/|#)/i.test(src)) img.setAttribute("src", "/notes/" + src);
+      img.addEventListener("load", () => {
+        const sc = cm.getScrollInfo();
+        cm.refresh();
+        cm.scrollTo(sc.left, sc.top);
+      });
     });
     root.querySelectorAll('a[href^="http"]').forEach((a) => { a.target = "_blank"; a.rel = "noopener"; });
   }
@@ -308,9 +352,12 @@
         body: JSON.stringify({ markdown: source }),
       });
       const { html } = await res.json();
+      const sc = cm.getScrollInfo();
       node.innerHTML = html;
       resolvePreviewNode(node);
       if (type === "mermaid") await renderMermaidIn(node);
+      cm.refresh();
+      cm.scrollTo(sc.left, sc.top);
     } catch {
       node.innerHTML = '<p class="render-error">preview failed</p>';
     }
@@ -342,7 +389,6 @@
     statusEl.textContent = `${currentFile || "no file"} · ${words} words · ${text.length} chars`;
   }
 
-  /* ---------------- image paste / drop ---------------- */
   const editorPane = $("#editor-pane");
   ["dragover", "drop"].forEach((ev) => editorPane.addEventListener(ev, (e) => e.preventDefault()));
   editorPane.addEventListener("drop", (e) => {
@@ -353,8 +399,18 @@
     if (images.length) handleFiles(images);
   });
   cm.getWrapperElement().addEventListener("paste", (e) => {
-    if (e.clipboardData?.files?.length) { e.preventDefault(); handleFiles(e.clipboardData.files); }
+    if (e.clipboardData?.files?.length) { e.preventDefault(); handleFiles(e.clipboardData.files); return; }
+    const html = e.clipboardData?.getData("text/html") || "";
+    if (htmlLooksRich(html)) {
+      e.preventDefault();
+      cm.replaceSelection(htmlToMarkdown(html));
+      cm.focus();
+    }
   });
+
+  function htmlLooksRich(html) {
+    return /<(?:b|strong|i|em|u|s|strike|del|table|thead|tbody|tr|img|h[1-6]|li|ul|ol|blockquote|pre|a)\b/i.test(html);
+  }
 
   async function handleFiles(files) {
     for (const file of files) {
@@ -372,7 +428,6 @@
     }
   }
 
-  /* ---------------- wormhole.app share ---------------- */
   const modal = $("#wormhole-modal");
   const statusP = $("#wormhole-status");
   const qrImg = $("#wormhole-qr");
@@ -391,7 +446,7 @@
     if (!shareUrl) return;
     if (navigator.share) {
       try { await navigator.share({ title: "Basalt vault", url: shareUrl, text: shareUrl }); return; }
-      catch (e) { if (e.name === "AbortError") return; }
+      catch (err) { if (err.name === "AbortError") return; }
     }
     await navigator.clipboard.writeText(shareUrl);
     setStatus("Share link copied");
@@ -406,7 +461,7 @@
     shareBtn.classList.add("hidden");
     copyBtn.classList.add("hidden");
     try {
-      await saveNow();
+      await saveNow({ force: true });
       const res = await fetch("/api/wormhole", { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Share failed");
@@ -419,8 +474,8 @@
       shareBtn.classList.remove("hidden");
       copyBtn.classList.remove("hidden");
       statusP.textContent = "Scan the QR code or share this wormhole.app link (expires in about 24h).";
-    } catch (e) {
-      statusP.textContent = e.message || String(e);
+    } catch (err) {
+      statusP.textContent = err.message || String(err);
     }
   }
 

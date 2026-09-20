@@ -14,7 +14,12 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "127.0.0.1";
 
 function defaultNotesDir() {
-  return path.resolve(process.env.NOTES_DIR || path.join(__dirname, "notes"));
+  if (process.env.NOTES_DIR) return path.resolve(process.env.NOTES_DIR);
+  if (process.versions.electron) {
+    const { app } = require("electron");
+    if (app && app.getPath) return path.join(app.getPath("userData"), "notes");
+  }
+  return path.join(__dirname, "notes");
 }
 
 function ensureVault(notesDir) {

@@ -9,7 +9,9 @@
     "postinstall": "node scripts/copy-vendor.js",
     "start": "electron --no-sandbox .",
     "web": "node server.js",
-    "dev": "electron --no-sandbox ."
+    "dev": "electron --no-sandbox .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder --publish never"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",
@@ -25,6 +27,24 @@
     "wormhole-crypto": "^0.3.1"
   },
   "devDependencies": {
-    "electron": "^32.2.0"
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.basalt.app",
+    "productName": "Basalt",
+    "files": [
+      "electron/**",
+      "public/**",
+      "templates/**",
+      "server.js",
+      "render.js",
+      "wormhole-app.js",
+      "package.json"
+    ],
+    "directories": { "output": "dist" },
+    "linux": { "target": ["AppImage"], "category": "Office" },
+    "mac": { "target": ["zip"], "category": "public.app-category.productivity" },
+    "win": { "target": ["nsis"] }
   }
 }

@@ -47,6 +47,9 @@ span.cm-hr, span.cm-comment { color: #5d6789; }
 span.cm-em { font-style: italic; }
 span.cm-strong { font-weight: 700; }
 span.cm-strikethrough { text-decoration: line-through; }
+span.cm-formatting-strikethrough { text-decoration: none; opacity: .45; }
+span.cm-underline { text-decoration: underline; text-underline-offset: 2px; }
+.cm-preview-widget u { text-decoration: underline; }
 
 .cm-preview-widget {
   padding: 10px 14px; margin: 6px 8px 6px 0; background: var(--bg-2);
