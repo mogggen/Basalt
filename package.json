@@ -1,0 +1,21 @@
+{
+  "name": "basalt",
+  "version": "1.0.0",
+  "description": "A tiny FOSS, Obsidian-flavoured markdown vault. Node.js web server.",
+  "main": "server.js",
+  "license": "MIT",
+  "engines": { "node": ">=16" },
+  "scripts": {
+    "postinstall": "node scripts/copy-vendor.js",
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "codemirror": "^5.65.16",
+    "express": "^4.19.2",
+    "highlight.js": "^11.9.0",
+    "marked": "^4.3.0",
+    "mermaid": "^10.9.0"
+  }
+}
