@@ -1,21 +1,30 @@
 {
   "name": "basalt",
-  "version": "1.0.0",
-  "description": "A tiny FOSS, Obsidian-flavoured markdown vault. Node.js web server.",
-  "main": "server.js",
+  "version": "1.1.0",
+  "description": "A tiny FOSS, Obsidian-flavoured markdown vault as an Electron app.",
+  "main": "electron/main.js",
   "license": "MIT",
-  "engines": { "node": ">=16" },
+  "engines": { "node": ">=18" },
   "scripts": {
     "postinstall": "node scripts/copy-vendor.js",
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "electron --no-sandbox .",
+    "web": "node server.js",
+    "dev": "electron --no-sandbox ."
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "codemirror": "^5.65.16",
+    "create-torrent": "^5.0.2",
     "express": "^4.19.2",
     "highlight.js": "^11.9.0",
     "marked": "^4.3.0",
-    "mermaid": "^10.9.0"
+    "mermaid": "^10.9.0",
+    "parse-torrent": "^9.1.5",
+    "qrcode": "^1.5.4",
+    "wormhole-crypto": "^0.3.1"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0"
   }
 }
